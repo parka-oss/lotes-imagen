@@ -36,7 +36,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: ${{ inputs.paralelo > 20 && 20 || inputs.paralelo }}
+      max-parallel: ${{ fromJSON(inputs.paralelo) > 20 && 20 || fromJSON(inputs.paralelo) }}
       matrix:
         orden: ${{ fromJSON(inputs.comandos) }}
     steps:
