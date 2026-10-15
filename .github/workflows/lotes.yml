@@ -1,0 +1,105 @@
+# Calculo repartido por lotes cifrados. Lo dispara solo gh_lotes.py (workflow_dispatch, requiere permiso de escritura).
+# Todo lo nuestro viaja cifrado: el lote (asset de la release), cada orden (entrada `comandos`) y cada salida (artifact).
+# El log publico solo muestra el codigo de salida y la duracion: el comando escribe a un archivo que vuelve cifrado.
+name: lotes
+run-name: lote ${{ inputs.corrida }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lote:
+        description: Tag de la release con el lote cifrado
+        required: true
+        type: string
+      comandos:
+        description: JSON con una lista de ordenes cifradas (un trabajo por orden)
+        required: true
+        type: string
+      paralelo:
+        description: Trabajos a la vez (maximo 20)
+        required: false
+        type: number
+        default: 10
+      corrida:
+        description: Identificador al azar de esta corrida (para encontrarla)
+        required: false
+        type: string
+        default: '-'
+
+permissions:
+  contents: read
+
+jobs:
+  trabajo:
+    name: trabajo ${{ strategy.job-index }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.paralelo > 20 && 20 || inputs.paralelo }}
+      matrix:
+        orden: ${{ fromJSON(inputs.comandos) }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-ubuntu-24.04-py311-np2.4.6-cv4.13.0.92-pil12.1.1-sp1.17.1-sk0.26.0
+
+      - name: preparar
+        run: |
+          python -m pip install -q --disable-pip-version-check numpy==2.4.6 opencv-python-headless==4.13.0.92 \
+            pillow==12.1.1 scipy==1.17.1 scikit-image==0.26.0 > /dev/null 2>&1 || { echo "pip fallo"; exit 1; }
+
+      - name: correr
+        env:
+          CLAVE: ${{ secrets.CLAVE_LOTES }}
+          ORDEN: ${{ matrix.orden }}
+          LOTE: ${{ inputs.lote }}
+          N: ${{ strategy.job-index }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          T="$RUNNER_TEMP"; mkdir -p "$T/raiz"; t0=$(date +%s)
+          fallar() { echo "$1"; echo "RC=97" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"; exit 0; }
+          ENC="-aes-256-cbc -pbkdf2 -iter 200000"
+          gh release download "$LOTE" -R "$GITHUB_REPOSITORY" -p lote.tar.enc -D "$T" > /dev/null 2>&1 || fallar "no se pudo bajar el lote"
+          openssl enc -d $ENC -pass env:CLAVE -in "$T/lote.tar.enc" 2> /dev/null | tar -xf - -C "$T/raiz" 2> /dev/null \
+            || fallar "no se pudo descifrar el lote"
+          printf '%s' "$ORDEN" | openssl enc -d $ENC -a -A -pass env:CLAVE -out "$T/orden.json" 2> /dev/null \
+            || fallar "no se pudo descifrar la orden"
+          mkdir -p ~/.local/share/fonts; find "$T/raiz" -maxdepth 1 -iname '*.ttf' -exec cp {} ~/.local/share/fonts/ \;
+          python -c 'import json,sys; o=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(o["salida"]); open(sys.argv[3],"w").write(o["cmd"])' \
+            "$T/orden.json" "$T/salida.txt" "$T/cmd.sh" || fallar "orden ilegible"
+          cd "$T/raiz"; SALIDA="$(cat "$T/salida.txt")"; mkdir -p "$SALIDA"
+          env -u CLAVE -u GH_TOKEN -u ORDEN RAIZ="$PWD" PYTHONUTF8=1 PYTHONUNBUFFERED=1 LC_ALL=C.UTF-8 \
+            bash "$T/cmd.sh" > "$T/trabajo.log" 2>&1 < /dev/null
+          rc=$?
+          python - "$SALIDA" "$T/trabajo.log" "$N" <<'PY' | openssl enc $ENC -salt -pass env:CLAVE -out "$T/salida.tar.enc" 2> /dev/null
+          import os, sys, tarfile
+          sal, log, n = sys.argv[1:4]
+          with tarfile.open(fileobj=sys.stdout.buffer, mode='w|', format=tarfile.PAX_FORMAT) as tf:
+              if os.path.isdir(sal):
+                  tf.add(sal, arcname=sal)
+              tf.add(log, arcname=f'{sal}/gh_trabajo{n}.log')
+          PY
+          [ -s "$T/salida.tar.enc" ] || fallar "no se pudo cifrar la salida"
+          echo "RC=$rc" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: salida-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/salida.tar.enc
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: ignore
+
+      - name: resultado
+        if: always()
+        run: |
+          echo "codigo de salida: ${RC:-?} - duracion: ${DUR:-?} s"
+          exit "${RC:-1}"

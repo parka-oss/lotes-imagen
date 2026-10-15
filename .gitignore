@@ -1,0 +1,7 @@
+# Solo se versionan el workflow, este .gitignore y el README: nada de datos, ni cifrados.
+*
+!.gitignore
+!README.md
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
