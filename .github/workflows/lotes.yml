@@ -25,6 +25,11 @@ on:
         required: false
         type: string
         default: '-'
+      extras:
+        description: "Librerias extra: 'ia' = rembg + onnxruntime + mediapipe (gh_lotes.py la pone sola si el lote las importa)"
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -47,12 +52,34 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-ubuntu-24.04-py311-np2.4.6-cv4.13.0.92-pil12.1.1-sp1.17.1-sk0.26.0
+          key: pip-ubuntu-24.04-py311-np2.4.6-cv4.13.0.92-pil12.1.1-sp1.17.1-sk0.26.0${{ inputs.extras == 'ia' && '-ia-rembg2.0.76-ort1.26.0-mp1.0.1' || '' }}
 
       - name: preparar
         run: |
           python -m pip install -q --disable-pip-version-check numpy==2.4.6 opencv-python-headless==4.13.0.92 \
             pillow==12.1.1 scipy==1.17.1 scikit-image==0.26.0 > /dev/null 2>&1 || { echo "pip fallo"; exit 1; }
+
+      # 10-15: extras de IA, mismas versiones que la laptop y el VPS. mediapipe sin dependencias: pide opencv-contrib, que
+      # pisaria el cv2 headless. Los modelos de rembg (~700 MB) se guardan en cache la primera vez.
+      - uses: actions/cache@v4
+        id: cache_u2net
+        if: inputs.extras == 'ia'
+        with:
+          path: ~/.u2net
+          key: u2net-v1-u2net-cloth-human-isnet
+
+      - name: preparar extras (ia)
+        if: inputs.extras == 'ia'
+        run: |
+          python -m pip install -q --disable-pip-version-check onnxruntime==1.26.0 rembg==2.0.76 pymatting==1.1.15             numba==0.65.1 llvmlite==0.47.0 pooch==1.9.0 jsonschema==4.26.0 tqdm==4.68.1 protobuf==6.33.6 sympy==1.14.0             absl-py==2.5.0 flatbuffers==25.12.19 matplotlib==3.10.9 > /dev/null 2>&1 || { echo "pip extras fallo"; exit 1; }
+          python -m pip install -q --disable-pip-version-check --no-deps mediapipe==1.0.1 > /dev/null 2>&1             || { echo "pip mediapipe fallo"; exit 1; }
+          ldconfig -p | grep -q libGLESv2.so.2 || sudo apt-get install -y -qq libgles2 > /dev/null 2>&1             || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 > /dev/null 2>&1; }             || { echo "libgles2 fallo"; exit 1; }
+          python -c "import rembg, onnxruntime; from mediapipe.tasks.python import vision" > /dev/null 2>&1             || { echo "import extras fallo"; exit 1; }
+
+      - name: modelos rembg
+        if: inputs.extras == 'ia' && steps.cache_u2net.outputs.cache-hit != 'true'
+        run: |
+          python -c "from rembg import new_session; [new_session(m) for m in ('u2net', 'u2net_cloth_seg', 'u2net_human_seg', 'isnet-general-use')]"             > /dev/null 2>&1 || { echo "modelos rembg fallo"; exit 1; }
 
       - name: correr
         env:
