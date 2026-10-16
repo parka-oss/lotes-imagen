@@ -73,7 +73,7 @@ jobs:
         run: |
           python -m pip install -q --disable-pip-version-check onnxruntime==1.26.0 rembg==2.0.76 pymatting==1.1.15             numba==0.65.1 llvmlite==0.47.0 pooch==1.9.0 jsonschema==4.26.0 tqdm==4.68.1 protobuf==6.33.6 sympy==1.14.0             absl-py==2.5.0 flatbuffers==25.12.19 matplotlib==3.10.9 > /dev/null 2>&1 || { echo "pip extras fallo"; exit 1; }
           python -m pip install -q --disable-pip-version-check --no-deps mediapipe==1.0.1 > /dev/null 2>&1             || { echo "pip mediapipe fallo"; exit 1; }
-          ldconfig -p | grep -q libGLESv2.so.2 || sudo apt-get install -y -qq libgles2 > /dev/null 2>&1             || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 > /dev/null 2>&1; }             || { echo "libgles2 fallo"; exit 1; }
+          { ldconfig -p | grep -q libGLESv2.so.2 && ldconfig -p | grep -q libEGL.so.1; } || sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1             || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1; }             || { echo "libgles2/libegl1 fallo"; exit 1; }
           python -c "import rembg, onnxruntime; from mediapipe.tasks.python import vision" > /dev/null 2>&1             || { echo "import extras fallo"; exit 1; }
 
       - name: modelos rembg
