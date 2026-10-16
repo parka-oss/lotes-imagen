@@ -91,7 +91,7 @@ jobs:
         run: |
           set +e
           T="$RUNNER_TEMP"; mkdir -p "$T/raiz"; t0=$(date +%s)
-          fallar() { echo "$1"; echo "RC=97" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"; exit 0; }
+          fallar() { echo "$1"; echo "RC=97" >> "$GITHUB_ENV"; echo "TIPO=caida" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"; exit 0; }
           ENC="-aes-256-cbc -pbkdf2 -iter 200000"
           gh release download "$LOTE" -R "$GITHUB_REPOSITORY" -p lote.tar.enc -D "$T" > /dev/null 2>&1 || fallar "no se pudo bajar el lote"
           openssl enc -d $ENC -pass env:CLAVE -in "$T/lote.tar.enc" 2> /dev/null | tar -xf - -C "$T/raiz" 2> /dev/null \
@@ -105,6 +105,12 @@ jobs:
           env -u CLAVE -u GH_TOKEN -u ORDEN RAIZ="$PWD" PYTHONUTF8=1 PYTHONUNBUFFERED=1 LC_ALL=C.UTF-8 \
             bash "$T/cmd.sh" > "$T/trabajo.log" 2>&1 < /dev/null
           rc=$?
+          # 10-16: rojo = CAIDA (traceback de Python, senal o timeout); un control que dijo FALLA/REVISAR no es caida
+          if [ "$rc" -eq 0 ]; then tipo=ok
+          elif grep -q "Traceback (most recent call last)" "$T/trabajo.log" || [ "$rc" -ge 124 ]; then tipo=caida
+          else tipo=veredicto; fi
+          echo "[lotes] codigo de salida: $rc - tipo: $tipo" >> "$T/trabajo.log"
+          echo "TIPO=$tipo" >> "$GITHUB_ENV"
           python - "$SALIDA" "$T/trabajo.log" "$N" <<'PY' | openssl enc $ENC -salt -pass env:CLAVE -out "$T/salida.tar.enc" 2> /dev/null
           import os, sys, tarfile
           sal, log, n = sys.argv[1:4]
@@ -128,5 +134,9 @@ jobs:
       - name: resultado
         if: always()
         run: |
-          echo "codigo de salida: ${RC:-?} - duracion: ${DUR:-?} s"
-          exit "${RC:-1}"
+          echo "codigo de salida: ${RC:-?} - tipo: ${TIPO:-caida} - duracion: ${DUR:-?} s"
+          case "${TIPO:-caida}" in
+            ok) exit 0 ;;
+            veredicto) echo "::notice title=veredicto::codigo ${RC}: el comando corrio entero y un control dijo FALLA o REVISAR (ver gh_trabajo.log)"; exit 0 ;;
+            *) echo "::error title=caida::codigo ${RC:-?}: el trabajo se cayo"; exit "${RC:-1}" ;;
+          esac
