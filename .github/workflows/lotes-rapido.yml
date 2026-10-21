@@ -5,6 +5,7 @@
 #   2. el lote se baja en segundo plano mientras se restauran las caches;
 #   3. lote = base fija + delta (solo lo que cambio); el delta trae una lista de archivos a sacar, asi el arbol queda
 #      igual al del lote completo.
+#   4. los .deb de libgles2/libegl1 en cache (dpkg en segundos, no apt) y la cache de numba por modelo de CPU.
 # Lo dispara solo tools/_dev_lotes_rapido/gh_rapido.py. Vuelta atras: borrar este archivo (ver PRUEBA.md).
 name: lotes-rapido
 run-name: rapido ${{ inputs.corrida }}
@@ -69,6 +70,15 @@ jobs:
           bajar "$LOTE" lote
           if [ -n "$BASE" ]; then bajar "$BASE" base; fi
 
+      # el modelo de CPU va a la clave de la cache de numba: numba (lo usa pymatting, que trae rembg) guarda lo compilado
+      # por modelo de CPU; con la cache del venv sola, en la otra familia de runners recompila 30-50 s en cada trabajo
+      - name: cpu
+        id: cpu
+        run: |
+          m=$(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs); echo "cpu: $m ($(nproc) nucleos)"
+          echo "modelo=$(printf '%s' "$m" | tr -c 'A-Za-z0-9' '-' | tr -s '-')" >> "$GITHUB_OUTPUT"
+          echo "NUMBA_CACHE_DIR=$HOME/numba" >> "$GITHUB_ENV"
+
       - uses: actions/setup-python@v5
         id: py
         with:
@@ -87,6 +97,13 @@ jobs:
         with:
           path: ~/.u2net
           key: u2net-v1-u2net-cloth-human-isnet
+
+      - uses: actions/cache@v4
+        id: cache_numba
+        if: inputs.extras == 'ia'
+        with:
+          path: ~/numba
+          key: numba-${{ steps.cpu.outputs.modelo }}-py${{ steps.py.outputs.python-version }}-rembg2.0.76-mp1.0.1-v1
 
       # los .deb que apt baja para libgles2/libegl1 (solo los que la imagen no trae): dpkg -i en segundos contra
       # 51 s de apt. Si la imagen cambia y dpkg falla, se vuelve a apt (abajo).
@@ -134,8 +151,10 @@ jobs:
               sudo rm -rf ~/debs/partial ~/debs/lock; sudo chown -R "$(id -u):$(id -g)" ~/debs 2> /dev/null || true
               echo "libgles: apt ($(ls ~/debs/*.deb 2> /dev/null | wc -l) .deb guardados para la cache)"
             fi
+            ti=$(date +%s)
             ~/venv/bin/python -c "import rembg, onnxruntime; from mediapipe.tasks.python import vision" > /dev/null 2>&1 \
               || { echo "import extras fallo"; exit 1; }
+            echo "import extras: $(( $(date +%s) - ti )) s (cache numba: ${{ steps.cache_numba.outputs.cache-hit }})"
           fi
           echo "entorno: $(( $(date +%s) - t )) s (venv de cache: ${{ steps.venv.outputs.cache-hit }})"
 
