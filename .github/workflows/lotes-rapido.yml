@@ -88,6 +88,15 @@ jobs:
           path: ~/.u2net
           key: u2net-v1-u2net-cloth-human-isnet
 
+      # los .deb que apt baja para libgles2/libegl1 (solo los que la imagen no trae): dpkg -i en segundos contra
+      # 51 s de apt. Si la imagen cambia y dpkg falla, se vuelve a apt (abajo).
+      - uses: actions/cache@v4
+        id: cache_debs
+        if: inputs.extras == 'ia'
+        with:
+          path: ~/debs
+          key: debs-ubuntu-24.04-libgles2-libegl1-v1
+
       # solo cuando falta la cache del venv: mismas versiones y mismo orden que lotes.yml
       - name: preparar venv (sin cache)
         if: steps.venv.outputs.cache-hit != 'true'
@@ -107,10 +116,24 @@ jobs:
         run: |
           t=$(date +%s); echo "$HOME/venv/bin" >> "$GITHUB_PATH"
           if [ "${{ inputs.extras }}" = "ia" ]; then
-            { ldconfig -p | grep -q libGLESv2.so.2 && ldconfig -p | grep -q libEGL.so.1; } && echo "libgles: ya estaban" \
-              || sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1 \
-              || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1; } \
-              || { echo "libgles2/libegl1 fallo"; exit 1; }
+            # sin "ldconfig -p | grep -q": con pipefail el SIGPIPE de ldconfig daria falso "no estan"
+            gles() { local l; l=$(ldconfig -p); grep -q libGLESv2.so.2 <<< "$l" && grep -q libEGL.so.1 <<< "$l"; }
+            # solo los .deb cuyo paquete no esta instalado (si la imagen ya trae alguno, no se toca)
+            debs_faltan() { for d in ~/debs/*.deb; do [ -f "$d" ] || continue; p=$(dpkg-deb -f "$d" Package)
+              dpkg-query -W -f='${Status}' "$p" 2> /dev/null | grep -q "install ok installed" || echo "$d"; done; }
+            instalar_debs() { L=$(debs_faltan); [ -z "$L" ] || sudo dpkg -i $L > /dev/null 2>&1; }
+            bajar_debs() { mkdir -p ~/debs/partial; sudo apt-get install -y -qq --download-only -o Dir::Cache::archives="$HOME/debs" libgles2 libegl1 > /dev/null 2>&1; }
+            if gles; then echo "libgles: ya estaban"
+            elif [ "${{ steps.cache_debs.outputs.cache-hit }}" = "true" ] && instalar_debs && gles; then echo "libgles: dpkg desde cache ($(ls ~/debs/*.deb | wc -l) .deb)"
+            else
+              # sin cache (o fallo dpkg): se bajan los .deb a ~/debs (los guarda la cache al final) y se instalan
+              { bajar_debs || { sudo apt-get update -qq > /dev/null 2>&1 && bajar_debs; }; } && instalar_debs && gles \
+                || sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1 \
+                || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1; } \
+                || { echo "libgles2/libegl1 fallo"; exit 1; }
+              sudo rm -rf ~/debs/partial ~/debs/lock; sudo chown -R "$(id -u):$(id -g)" ~/debs 2> /dev/null || true
+              echo "libgles: apt ($(ls ~/debs/*.deb 2> /dev/null | wc -l) .deb guardados para la cache)"
+            fi
             ~/venv/bin/python -c "import rembg, onnxruntime; from mediapipe.tasks.python import vision" > /dev/null 2>&1 \
               || { echo "import extras fallo"; exit 1; }
           fi
