@@ -1,0 +1,194 @@
+# Variante rapida de lotes.yml (prueba de velocidad 10-21). lotes.yml queda igual y lo siguen usando las otras sesiones.
+# Misma regla: todo lo nuestro viaja cifrado (lote, ordenes, salidas). El log publico solo muestra codigos y tiempos.
+# Cambios contra lotes.yml:
+#   1. el entorno de Python entero (venv con las librerias y las extras) vive en cache: sin pip en cada trabajo;
+#   2. el lote se baja en segundo plano mientras se restauran las caches;
+#   3. lote = base fija + delta (solo lo que cambio); el delta trae una lista de archivos a sacar, asi el arbol queda
+#      igual al del lote completo.
+# Lo dispara solo tools/_dev_lotes_rapido/gh_rapido.py. Vuelta atras: borrar este archivo (ver PRUEBA.md).
+name: lotes-rapido
+run-name: rapido ${{ inputs.corrida }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      lote:
+        description: Tag de la release con el lote cifrado (o el delta si hay base)
+        required: true
+        type: string
+      base:
+        description: Tag de la release con el lote base cifrado ('' = el lote viene entero)
+        required: false
+        type: string
+        default: ''
+      comandos:
+        description: JSON con una lista de ordenes cifradas (un trabajo por orden)
+        required: true
+        type: string
+      paralelo:
+        description: Trabajos a la vez (maximo 20)
+        required: false
+        type: number
+        default: 10
+      corrida:
+        description: Identificador al azar de esta corrida (para encontrarla)
+        required: false
+        type: string
+        default: '-'
+      extras:
+        description: "Librerias extra: 'ia' = rembg + onnxruntime + mediapipe"
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  trabajo:
+    name: trabajo ${{ strategy.job-index }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ fromJSON(inputs.paralelo) > 20 && 20 || fromJSON(inputs.paralelo) }}
+      matrix:
+        orden: ${{ fromJSON(inputs.comandos) }}
+    steps:
+      - name: bajar lote (segundo plano)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          LOTE: ${{ inputs.lote }}
+          BASE: ${{ inputs.base }}
+        run: |
+          T="$RUNNER_TEMP"; echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+          bajar() {  # $1 tag, $2 nombre local; deja "<rc> <segundos>" en $T/$2.rc al terminar
+            setsid bash -c 't=$(date +%s); gh release download "$1" -R "$GITHUB_REPOSITORY" -p lote.tar.enc -D "$3/d_$2" > /dev/null 2>&1;
+              echo "$? $(( $(date +%s) - t ))" > "$3/$2.rc"' _ "$1" "$2" "$T" > /dev/null 2>&1 < /dev/null &
+          }
+          bajar "$LOTE" lote
+          if [ -n "$BASE" ]; then bajar "$BASE" base; fi
+
+      - uses: actions/setup-python@v5
+        id: py
+        with:
+          python-version: '3.11'
+
+      - uses: actions/cache@v4
+        id: venv
+        with:
+          path: ~/venv
+          key: venv-ubuntu-24.04-py${{ steps.py.outputs.python-version }}-np2.4.6-cv4.13.0.92-pil12.1.1-sp1.17.1-sk0.26.0${{ inputs.extras == 'ia' && '-ia-rembg2.0.76-ort1.26.0-mp1.0.1' || '' }}-v1
+
+      # misma cache de modelos que lotes.yml (misma clave: se comparte)
+      - uses: actions/cache@v4
+        id: cache_u2net
+        if: inputs.extras == 'ia'
+        with:
+          path: ~/.u2net
+          key: u2net-v1-u2net-cloth-human-isnet
+
+      # solo cuando falta la cache del venv: mismas versiones y mismo orden que lotes.yml
+      - name: preparar venv (sin cache)
+        if: steps.venv.outputs.cache-hit != 'true'
+        run: |
+          python -m venv ~/venv; P=~/venv/bin/python
+          $P -m pip install -q --disable-pip-version-check numpy==2.4.6 opencv-python-headless==4.13.0.92 \
+            pillow==12.1.1 scipy==1.17.1 scikit-image==0.26.0 > /dev/null 2>&1 || { echo "pip fallo"; exit 1; }
+          if [ "${{ inputs.extras }}" = "ia" ]; then
+            $P -m pip install -q --disable-pip-version-check onnxruntime==1.26.0 rembg==2.0.76 pymatting==1.1.15 \
+              numba==0.65.1 llvmlite==0.47.0 pooch==1.9.0 jsonschema==4.26.0 tqdm==4.68.1 protobuf==6.33.6 sympy==1.14.0 \
+              absl-py==2.5.0 flatbuffers==25.12.19 matplotlib==3.10.9 > /dev/null 2>&1 || { echo "pip extras fallo"; exit 1; }
+            $P -m pip install -q --disable-pip-version-check --no-deps mediapipe==1.0.1 > /dev/null 2>&1 \
+              || { echo "pip mediapipe fallo"; exit 1; }
+          fi
+
+      - name: entorno
+        run: |
+          t=$(date +%s); echo "$HOME/venv/bin" >> "$GITHUB_PATH"
+          if [ "${{ inputs.extras }}" = "ia" ]; then
+            { ldconfig -p | grep -q libGLESv2.so.2 && ldconfig -p | grep -q libEGL.so.1; } && echo "libgles: ya estaban" \
+              || sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1 \
+              || { sudo apt-get update -qq > /dev/null 2>&1 && sudo apt-get install -y -qq libgles2 libegl1 > /dev/null 2>&1; } \
+              || { echo "libgles2/libegl1 fallo"; exit 1; }
+            ~/venv/bin/python -c "import rembg, onnxruntime; from mediapipe.tasks.python import vision" > /dev/null 2>&1 \
+              || { echo "import extras fallo"; exit 1; }
+          fi
+          echo "entorno: $(( $(date +%s) - t )) s (venv de cache: ${{ steps.venv.outputs.cache-hit }})"
+
+      - name: modelos rembg
+        if: inputs.extras == 'ia' && steps.cache_u2net.outputs.cache-hit != 'true'
+        run: |
+          ~/venv/bin/python -c "from rembg import new_session; [new_session(m) for m in ('u2net', 'u2net_cloth_seg', 'u2net_human_seg', 'isnet-general-use')]" \
+            > /dev/null 2>&1 || { echo "modelos rembg fallo"; exit 1; }
+
+      - name: correr
+        env:
+          CLAVE: ${{ secrets.CLAVE_LOTES }}
+          ORDEN: ${{ matrix.orden }}
+          BASE: ${{ inputs.base }}
+          N: ${{ strategy.job-index }}
+        run: |
+          set +e
+          T="$RUNNER_TEMP"; mkdir -p "$T/raiz"; t0=$(date +%s)
+          fallar() { echo "$1"; echo "RC=97" >> "$GITHUB_ENV"; echo "TIPO=caida" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"; exit 0; }
+          ENC="-aes-256-cbc -pbkdf2 -iter 200000"
+          esperar_lote() { for i in $(seq 1 600); do [ -s "$T/$1.rc" ] && break; sleep 0.5; done; read rc s < "$T/$1.rc" 2> /dev/null; echo "bajar $1: rc=${rc:-?} ${s:-?} s"; [ "${rc:-1}" = "0" ]; }
+          if [ -n "$BASE" ]; then
+            esperar_lote base || fallar "no se pudo bajar la base"
+            openssl enc -d $ENC -pass env:CLAVE -in "$T/d_base/lote.tar.enc" 2> /dev/null | tar -xf - -C "$T/raiz" 2> /dev/null \
+              || fallar "no se pudo descifrar la base"
+          fi
+          esperar_lote lote || fallar "no se pudo bajar el lote"
+          openssl enc -d $ENC -pass env:CLAVE -in "$T/d_lote/lote.tar.enc" 2> /dev/null | tar -xf - -C "$T/raiz" 2> /dev/null \
+            || fallar "no se pudo descifrar el lote"
+          # delta: archivos de la base que el lote completo no tendria (lista cifrada dentro del delta)
+          if [ -f "$T/raiz/.lote_borrar" ]; then
+            python -c 'import os,sys; r=sys.argv[1]; [os.remove(os.path.join(r,l)) for l in open(os.path.join(r,".lote_borrar"),encoding="utf-8").read().splitlines() if l and os.path.isfile(os.path.join(r,l))]; os.remove(os.path.join(r,".lote_borrar"))' "$T/raiz" \
+              || fallar "no se pudo aplicar el delta"
+          fi
+          t1=$(date +%s)
+          printf '%s' "$ORDEN" | openssl enc -d $ENC -a -A -pass env:CLAVE -out "$T/orden.json" 2> /dev/null \
+            || fallar "no se pudo descifrar la orden"
+          mkdir -p ~/.local/share/fonts; find "$T/raiz" -maxdepth 1 -iname '*.ttf' -exec cp {} ~/.local/share/fonts/ \;
+          python -c 'import json,sys; o=json.load(open(sys.argv[1])); open(sys.argv[2],"w").write(o["salida"]); open(sys.argv[3],"w").write(o["cmd"])' \
+            "$T/orden.json" "$T/salida.txt" "$T/cmd.sh" || fallar "orden ilegible"
+          cd "$T/raiz"; SALIDA="$(cat "$T/salida.txt")"; mkdir -p "$SALIDA"
+          env -u CLAVE -u GH_TOKEN -u ORDEN RAIZ="$PWD" PYTHONUTF8=1 PYTHONUNBUFFERED=1 LC_ALL=C.UTF-8 \
+            bash "$T/cmd.sh" > "$T/trabajo.log" 2>&1 < /dev/null
+          rc=$?; t2=$(date +%s)
+          if [ "$rc" -eq 0 ]; then tipo=ok
+          elif grep -q "Traceback (most recent call last)" "$T/trabajo.log" || [ "$rc" -ge 124 ]; then tipo=caida
+          else tipo=veredicto; fi
+          echo "[lotes] codigo de salida: $rc - tipo: $tipo" >> "$T/trabajo.log"
+          echo "TIPO=$tipo" >> "$GITHUB_ENV"
+          python - "$SALIDA" "$T/trabajo.log" "$N" <<'PY' | openssl enc $ENC -salt -pass env:CLAVE -out "$T/salida.tar.enc" 2> /dev/null
+          import os, sys, tarfile
+          sal, log, n = sys.argv[1:4]
+          with tarfile.open(fileobj=sys.stdout.buffer, mode='w|', format=tarfile.PAX_FORMAT) as tf:
+              if os.path.isdir(sal):
+                  tf.add(sal, arcname=sal)
+              tf.add(log, arcname=f'{sal}/gh_trabajo{n}.log')
+          PY
+          [ -s "$T/salida.tar.enc" ] || fallar "no se pudo cifrar la salida"
+          echo "fases: desde el arranque hasta lote listo $(( t1 - T0 )) s, lote listo $(( t1 - t0 )) s en este paso, calculo $(( t2 - t1 )) s"
+          echo "RC=$rc" >> "$GITHUB_ENV"; echo "DUR=$(( $(date +%s) - t0 ))" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: salida-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/salida.tar.enc
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: ignore
+
+      - name: resultado
+        if: always()
+        run: |
+          echo "codigo de salida: ${RC:-?} - tipo: ${TIPO:-caida} - duracion: ${DUR:-?} s"
+          case "${TIPO:-caida}" in
+            ok) exit 0 ;;
+            veredicto) echo "::notice title=veredicto::codigo ${RC}: el comando corrio entero y un control dijo FALLA o REVISAR (ver gh_trabajo.log)"; exit 0 ;;
+            *) echo "::error title=caida::codigo ${RC:-?}: el trabajo se cayo"; exit "${RC:-1}" ;;
+          esac
